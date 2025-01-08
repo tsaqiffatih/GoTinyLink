@@ -5,7 +5,7 @@
 import { useState } from "react";
 import axios from "axios";
 
-const API_BASE_URL = "http://localhost:8080";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 type URLData = {
   id: string;
@@ -121,14 +121,14 @@ export default function Home() {
       {/* Support Us Section */}
       <div className="mt-8 bg-white shadow-lg rounded-lg p-6 max-w-md lg:max-w-xl w-full text-center text-gray-800">
         <h2 className="text-2xl font-bold mb-4 text-indigo-700">
-          Support Us ❤️
+          Support Me ❤️
         </h2>
         <p className="text-gray-600 mb-4">
-          Help us keep GoTinyLink free and awesome! You can support us by:
+          Help me keep Go-TinyLink free and awesome! You can support me by:
         </p>
         <div className="flex flex-col gap-4">
           <a
-            href="https://paypal.me/fatihtsaqif?country.x=ID&locale.x=id_ID"
+            href="https://saweria.co/tsaqiffatih"
             target="_blank"
             rel="noopener noreferrer"
             className="bg-yellow-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-yellow-600"

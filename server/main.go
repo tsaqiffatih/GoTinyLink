@@ -1,40 +1,85 @@
 package main
 
 import (
+	"context"
+	"log"
 	"math/rand"
 	"net/http"
-	"sync"
+	"os"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 type URL struct {
-	ID          string    `json:"id"`
+	ID          string    `json:"id" gorm:"primaryKey"`
 	URL         string    `json:"url"`
-	ShortCode   string    `json:"shortCode"`
+	ShortCode   string    `json:"shortCode" gorm:"uniqueIndex"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 	AccessCount int       `json:"accessCount"`
 }
 
 var (
-	urlStore = make(map[string]*URL)
-	mu       sync.RWMutex
+	db    *gorm.DB
+	cache *redis.Client
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file")
+	}
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		log.Fatalf("DATABASE_URL is not set in the environment")
+	}
+
+	db, err = gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
+	if err != nil {
+		panic("failed to connect database")
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil || sqlDB.Ping() != nil {
+		panic("failed to ping database")
+	}
+
+	log.Println("Successfully connected and pinged database")
+
+	db.AutoMigrate(&URL{})
+
+	// Redis connection
+	cache = redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_PORT"),
+		Username: os.Getenv("REDIS_USERNAME"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       0,
+	})
+
+	_, err = cache.Ping(context.Background()).Result()
+	if err != nil {
+		log.Println(err)
+		panic("failed to connect Redis")
+	}
+	log.Println("Successfully connected to Redis")
+
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000", "https://example.com"}, // Daftar origin yang diizinkan
-		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},                 // Metode HTTP yang diizinkan
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},      // Header yang diizinkan
-		ExposeHeaders:    []string{"Content-Length"},                               // Header yang dapat diakses di client
-		AllowCredentials: true,                                                     // Izinkan cookie untuk cross-origin
-		MaxAge:           12 * time.Hour,                                           // Cache preflight request selama 12 jam
+		AllowOrigins:     []string{"http://localhost:3000", "https://example.com"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
 	}))
 
 	r.POST("/shorten", createShortURL)
@@ -46,7 +91,7 @@ func main() {
 	r.Run(":8080")
 }
 
-// Generate a random short code
+// generate a random short code
 func generateShortCode() string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 6)
@@ -56,7 +101,7 @@ func generateShortCode() string {
 	return string(b)
 }
 
-// Create a new short URL
+// create a new short URL
 func createShortURL(c *gin.Context) {
 	var req struct {
 		URL string `json:"url" binding:"required,url"`
@@ -65,9 +110,6 @@ func createShortURL(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
 
 	shortCode := generateShortCode()
 	newURL := &URL{
@@ -78,31 +120,46 @@ func createShortURL(c *gin.Context) {
 		UpdatedAt:   time.Now(),
 		AccessCount: 0,
 	}
-	urlStore[shortCode] = newURL
+
+	if err := db.Create(newURL).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusCreated, newURL)
 }
 
-// Retrieve the original URL
+// retrieve the original URL
 func retrieveOriginalURL(c *gin.Context) {
 	shortCode := c.Param("shortCode")
+	ctx := c.Request.Context()
 
-	mu.RLock()
-	defer mu.RUnlock()
+	// check in redis cache
+	cachedURL, err := cache.Get(ctx, shortCode).Result()
+	if err == nil {
 
-	url, exists := urlStore[shortCode]
-	if !exists {
-		// if not found, user will redirect to fe url
+		go func() {
+			updateAccessCount(ctx, shortCode)
+		}()
+		c.Redirect(http.StatusFound, cachedURL)
+		return
+	}
+
+	var url URL
+	if err := db.WithContext(ctx).Where("short_code = ?", shortCode).First(&url).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Short URL not found"})
 		return
 	}
 
 	url.AccessCount++
-	// c.JSON(http.StatusOK, url)
+	db.WithContext(ctx).Save(&url)
+
+	cache.Set(ctx, shortCode, url.URL, 10*time.Minute)
+
 	c.Redirect(http.StatusFound, url.URL)
 }
 
-// Update an existing short URL
+// update an existing short URL
 func updateShortURL(c *gin.Context) {
 	shortCode := c.Param("shortCode")
 
@@ -114,48 +171,55 @@ func updateShortURL(c *gin.Context) {
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	url, exists := urlStore[shortCode]
-	if !exists {
+	var url URL
+	ctx := c.Request.Context()
+	if err := db.WithContext(ctx).Where("short_code = ?", shortCode).First(&url).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Short URL not found"})
 		return
 	}
 
 	url.URL = req.URL
 	url.UpdatedAt = time.Now()
+	db.WithContext(ctx).Save(&url)
+
+	cache.Set(ctx, shortCode, req.URL, 10*time.Minute)
+
 	c.JSON(http.StatusOK, url)
 }
 
-// Delete a short URL
+// delete a short URL
 func deleteShortURL(c *gin.Context) {
 	shortCode := c.Param("shortCode")
+	ctx := c.Request.Context()
 
-	mu.Lock()
-	defer mu.Unlock()
-
-	if _, exists := urlStore[shortCode]; !exists {
+	if err := db.WithContext(ctx).Where("short_code = ?", shortCode).Delete(&URL{}).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Short URL not found"})
 		return
 	}
 
-	delete(urlStore, shortCode)
+	cache.Del(ctx, shortCode)
+
 	c.Status(http.StatusNoContent)
 }
 
-// Get statistics for a short URL
+// get statistics for a short URL
 func getURLStats(c *gin.Context) {
 	shortCode := c.Param("shortCode")
 
-	mu.RLock()
-	defer mu.RUnlock()
-
-	url, exists := urlStore[shortCode]
-	if !exists {
+	var url URL
+	if err := db.Where("short_code = ?", shortCode).First(&url).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Short URL not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, url)
+}
+
+// update access count asynchronously
+func updateAccessCount(ctx context.Context, shortCode string) {
+	var url URL
+	if err := db.WithContext(ctx).Where("short_code = ?", shortCode).First(&url).Error; err == nil {
+		url.AccessCount++
+		db.Save(&url)
+	}
 }
