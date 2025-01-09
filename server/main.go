@@ -3,32 +3,32 @@ package main
 import (
 	"context"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+
+	"github.com/speps/go-hashids"
 )
 
 type URL struct {
-	ID          string    `json:"id" gorm:"primaryKey"`
+	gorm.Model
 	URL         string    `json:"url"`
 	ShortCode   string    `json:"shortCode" gorm:"uniqueIndex"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
 	AccessCount int       `json:"accessCount"`
+	ExpiresAt   time.Time `json:"expiresAt"`
 }
 
 var (
-	db    *gorm.DB
-	cache *redis.Client
+	db       *gorm.DB
+	cache    *redis.Client
+	hashSalt = "your_custom_salt"
 )
 
 func main() {
@@ -54,7 +54,11 @@ func main() {
 
 	log.Println("Successfully connected and pinged database")
 
-	db.AutoMigrate(&URL{})
+	// db.Migrator().DropTable(&URL{})
+
+	if err := db.AutoMigrate(&URL{}); err != nil {
+		log.Fatalf("Failed to migrate database: %v", err)
+	}
 
 	// Redis connection
 	cache = redis.NewClient(&redis.Options{
@@ -72,6 +76,16 @@ func main() {
 	log.Println("Successfully connected to Redis")
 
 	r := gin.Default()
+
+	// ticker to delete expired URLs every 24 hours
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			deleteExpiredURLs()
+		}
+	}()
 
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:3000", "https://example.com"},
@@ -91,18 +105,26 @@ func main() {
 	r.Run(":8080")
 }
 
-// generate a random short code
-func generateShortCode() string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 6)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
+// ticker for deleting expired URLs
+func deleteExpiredURLs() {
+	now := time.Now()
+	result := db.Where("expires_at <= ?", now).Delete(&URL{})
+	log.Printf("Deleted %d expired URLs", result.RowsAffected)
+}
+
+func generateShortCode(id uint) string {
+	hd := hashids.NewData()
+	hd.Salt = hashSalt // Use the predefined hashSalt
+	hd.MinLength = 6   // Minimum length of the short code
+	h, _ := hashids.NewWithData(hd)
+	hash, _ := h.Encode([]int{int(id)})
+	return hash
 }
 
 // create a new short URL
 func createShortURL(c *gin.Context) {
+	var newURL URL
+
 	var req struct {
 		URL string `json:"url" binding:"required,url"`
 	}
@@ -111,17 +133,19 @@ func createShortURL(c *gin.Context) {
 		return
 	}
 
-	shortCode := generateShortCode()
-	newURL := &URL{
-		ID:          uuid.NewString(),
-		URL:         req.URL,
-		ShortCode:   shortCode,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		AccessCount: 0,
+	newURL.URL = req.URL
+	newURL.AccessCount = 0
+	newURL.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
+
+	if err := db.Create(&newURL).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
-	if err := db.Create(newURL).Error; err != nil {
+	shortCode := generateShortCode(newURL.ID)
+	newURL.ShortCode = shortCode
+
+	if err := db.Save(&newURL).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -154,7 +178,7 @@ func retrieveOriginalURL(c *gin.Context) {
 	url.AccessCount++
 	db.WithContext(ctx).Save(&url)
 
-	cache.Set(ctx, shortCode, url.URL, 10*time.Minute)
+	cache.Set(ctx, shortCode, url.URL, 30*24*time.Hour)
 
 	c.Redirect(http.StatusFound, url.URL)
 }
@@ -182,7 +206,7 @@ func updateShortURL(c *gin.Context) {
 	url.UpdatedAt = time.Now()
 	db.WithContext(ctx).Save(&url)
 
-	cache.Set(ctx, shortCode, req.URL, 10*time.Minute)
+	cache.Set(ctx, shortCode, req.URL, 30*24*time.Hour)
 
 	c.JSON(http.StatusOK, url)
 }
