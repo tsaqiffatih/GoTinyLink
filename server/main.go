@@ -114,8 +114,8 @@ func deleteExpiredURLs() {
 
 func generateShortCode(id uint) string {
 	hd := hashids.NewData()
-	hd.Salt = hashSalt // Use the predefined hashSalt
-	hd.MinLength = 6   // Minimum length of the short code
+	hd.Salt = hashSalt
+	hd.MinLength = 6
 	h, _ := hashids.NewWithData(hd)
 	hash, _ := h.Encode([]int{int(id)})
 	return hash
