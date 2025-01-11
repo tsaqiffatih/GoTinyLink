@@ -86,7 +86,7 @@ func main() {
 
 	log.Println("Successfully connected and pinged database")
 
-	db.Migrator().DropTable(&URL{})
+	// db.Migrator().DropTable(&URL{})
 
 	if err := db.AutoMigrate(&URL{}); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
