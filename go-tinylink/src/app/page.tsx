@@ -8,12 +8,10 @@ import axios from "axios";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
 type URLData = {
-  id: string;
   url: string;
   shortCode: string;
-  createdAt: string;
-  updatedAt: string;
   accessCount: number;
+  expiresAt: string;
 };
 
 export default function Home() {
@@ -28,6 +26,7 @@ export default function Home() {
     try {
       const { data } = await axios.post(`${API_BASE_URL}/shorten`, { url });
       setShortenedURL(data);
+      console.log(data);
     } catch (err: any) {
       setError(err.response?.data?.error || "An error occurred");
     }
@@ -38,14 +37,14 @@ export default function Home() {
       const link = `${API_BASE_URL}/shorten/${shortenedURL.shortCode}`;
       navigator.clipboard.writeText(link).then(() => {
         setCopySuccess(true);
-        setTimeout(() => setCopySuccess(false), 3000); // Reset after 3 seconds
+        setTimeout(() => setCopySuccess(false), 3000);
       });
     }
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-500 via-blue-600 to-indigo-700 flex flex-col items-center justify-center p-6 text-white">
-      {/* Header Section */}
+      {/* header section */}
       <header className="text-center mb-8">
         <h1 className="text-4xl font-bold text-white">Go-TinyLink</h1>
         <p className="text-lg font-medium text-gray-100">
@@ -53,7 +52,7 @@ export default function Home() {
         </p>
       </header>
 
-      {/* Main Content Section */}
+      {/* main content section */}
       <main className="w-full max-w-md lg:max-w-xl bg-white shadow-lg rounded-lg p-8 text-gray-800">
         <section aria-labelledby="shorten-link-section">
           <h2 id="shorten-link-section" className="text-2xl font-bold text-indigo-700 mb-4">
@@ -124,7 +123,7 @@ export default function Home() {
         </section>
       </main>
 
-      {/* Support Section */}
+      {/* support section */}
       <aside className="mt-8 bg-white shadow-lg rounded-lg p-6 max-w-md lg:max-w-xl w-full text-center text-gray-800">
         <h2 className="text-2xl font-bold mb-4 text-indigo-700">Support Me ❤️</h2>
         <p className="text-gray-800 mb-4">
@@ -158,7 +157,7 @@ export default function Home() {
         </div>
       </aside>
 
-      {/* Footer Section */}
+      {/* footer section */}
       <footer className="mt-6 text-sm text-gray-50">
         Powered by <span className="font-bold">GoTinyLink</span>
       </footer>

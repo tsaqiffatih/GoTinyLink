@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -25,11 +26,28 @@ type URL struct {
 	ExpiresAt   time.Time `json:"expiresAt"`
 }
 
+type URLResponse struct {
+	Success     bool      `json:"success"`
+	URL         string    `json:"url"`
+	ShortCode   string    `json:"shortCode"`
+	AccessCount int       `json:"accessCount"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
 var (
-	db       *gorm.DB
-	cache    *redis.Client
-	hashSalt = "your_custom_salt"
+	db                 *gorm.DB
+	cache              *redis.Client
+	hashSalt           string
+	tickerInterval     = 24 * time.Hour
+	expirationInterval = 24 * 30 * time.Hour
 )
+
+var rateLimitStore = redis.NewClient(&redis.Options{
+	Addr:     os.Getenv("REDIS_PORT"),
+	Username: os.Getenv("REDIS_USERNAME"),
+	Password: os.Getenv("REDIS_PASSWORD"),
+	DB:       0,
+})
 
 func main() {
 	err := godotenv.Load()
@@ -41,6 +59,17 @@ func main() {
 	if databaseURL == "" {
 		log.Fatalf("DATABASE_URL is not set in the environment")
 	}
+
+	hashSalt = os.Getenv("HASH_SALT")
+	if hashSalt == "" {
+		log.Fatalf("HASH_SALT is not set in the environment")
+	}
+
+	allowOrigins := os.Getenv("ALLOW_ORIGINS")
+	if allowOrigins == "" {
+		log.Fatalf("ALLOW_ORIGINS is not set in the environment")
+	}
+	origins := strings.Split(allowOrigins, ",")
 
 	db, err = gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
 	if err != nil {
@@ -54,7 +83,7 @@ func main() {
 
 	log.Println("Successfully connected and pinged database")
 
-	// db.Migrator().DropTable(&URL{})
+	db.Migrator().DropTable(&URL{})
 
 	if err := db.AutoMigrate(&URL{}); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
@@ -77,18 +106,10 @@ func main() {
 
 	r := gin.Default()
 
-	// ticker to delete expired URLs every 24 hours
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for {
-			<-ticker.C
-			deleteExpiredURLs()
-		}
-	}()
+	r.Use(RateLimiterWithBlacklist(10, 1*time.Minute, 10*time.Minute))
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000", "https://example.com"},
+		AllowOrigins:     origins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
@@ -102,6 +123,16 @@ func main() {
 	r.DELETE("/shorten/:shortCode", deleteShortURL)
 	r.GET("/shorten/:shortCode/stats", getURLStats)
 
+	// ticker to delete expired URLs every 24 hours
+	go func() {
+		ticker := time.NewTicker(tickerInterval)
+		defer ticker.Stop()
+		for {
+			<-ticker.C
+			deleteExpiredURLs()
+		}
+	}()
+
 	r.Run(":8080")
 }
 
@@ -110,6 +141,47 @@ func deleteExpiredURLs() {
 	now := time.Now()
 	result := db.Where("expires_at <= ?", now).Delete(&URL{})
 	log.Printf("Deleted %d expired URLs", result.RowsAffected)
+}
+
+// middleware Rate Limiter dengan blacklist ip
+func RateLimiterWithBlacklist(limit int, window time.Duration, blacklistTTL time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		ctx := context.Background()
+
+		isBlacklisted, err := rateLimitStore.Get(ctx, "blacklist:"+ip).Result()
+		if err == nil && isBlacklisted == "1" {
+			// Jika IP ada dalam blacklist, kembalikan error 403
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": "Access denied. Your IP is temporarily blocked.",
+			})
+			return
+		}
+
+		key := "rate_limiter:" + ip
+		count, err := rateLimitStore.Incr(ctx, key).Result()
+		if err != nil {
+			log.Println("Redis error:", err)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+			return
+		}
+
+		if count == 1 {
+			rateLimitStore.Expire(ctx, key, window)
+		}
+
+		if int(count) > limit {
+			rateLimitStore.Set(ctx, "blacklist:"+ip, "1", blacklistTTL)
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error":       "Rate limit exceeded. Your IP has been temporarily blocked.",
+				"limit":       limit,
+				"time_window": window.String(),
+			})
+			return
+		}
+
+		c.Next()
+	}
 }
 
 func generateShortCode(id uint) string {
@@ -135,7 +207,8 @@ func createShortURL(c *gin.Context) {
 
 	newURL.URL = req.URL
 	newURL.AccessCount = 0
-	newURL.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
+	newURL.ExpiresAt = time.Now().Add(expirationInterval)
+	// newURL.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
 
 	if err := db.Create(&newURL).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -150,7 +223,15 @@ func createShortURL(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, newURL)
+	response := URLResponse{
+		Success:     true,
+		URL:         newURL.URL,
+		ShortCode:   newURL.ShortCode,
+		AccessCount: newURL.AccessCount,
+		ExpiresAt:   newURL.ExpiresAt,
+	}
+
+	c.JSON(http.StatusCreated, response)
 }
 
 // retrieve the original URL
@@ -206,7 +287,7 @@ func updateShortURL(c *gin.Context) {
 	url.UpdatedAt = time.Now()
 	db.WithContext(ctx).Save(&url)
 
-	cache.Set(ctx, shortCode, req.URL, 30*24*time.Hour)
+	cache.Set(ctx, shortCode, req.URL, expirationInterval)
 
 	c.JSON(http.StatusOK, url)
 }
