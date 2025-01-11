@@ -14,6 +14,7 @@ const geistMono = Geist_Mono({
 
 const DOMAIN_URL = process.env.NEXT_PUBLIC_DOMAIN_URL;
 
+// metadata for the entire site
 export const metadata: Metadata = {
   title: "Go-TinyLink: Simplify Your URLs with Our URL Shortener",
   description: "Simplify your links with Go-TinyLink, the easiest-to-use URL shortener. Create short, shareable links in seconds!",
