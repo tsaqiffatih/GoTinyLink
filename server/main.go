@@ -50,9 +50,11 @@ var rateLimitStore = redis.NewClient(&redis.Options{
 })
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file")
+	if _, err := os.Stat(".env"); err == nil {
+		err := godotenv.Load()
+		if err != nil {
+			log.Fatalf("Error loading .env file")
+		}
 	}
 
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -71,6 +73,7 @@ func main() {
 	}
 	origins := strings.Split(allowOrigins, ",")
 
+	var err error
 	db, err = gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
