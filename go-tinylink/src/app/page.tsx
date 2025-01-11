@@ -26,7 +26,6 @@ export default function Home() {
     try {
       const { data } = await axios.post(`${API_BASE_URL}/shorten`, { url });
       setShortenedURL(data);
-      console.log(data);
     } catch (err: any) {
       setError(err.response?.data?.error || "An error occurred");
     }
