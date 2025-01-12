@@ -6,6 +6,12 @@ GoTinyLink is a URL Shortener application built with a **Golang backend** and a 
 
 ---
 
+## Project Reference
+
+This project is part of the [roadmap.sh - URL Shortening Service](https://roadmap.sh/projects/url-shortening-service) challenge, which outlines the requirements and objectives for building a robust URL shortener service.
+
+---
+
 ## Features
 
 ### Backend Features
